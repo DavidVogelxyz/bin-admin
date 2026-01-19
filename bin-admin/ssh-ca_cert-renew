@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+
+# Name:     ssh-ca_cert-renew
+# Author:   David Vogel <david@davidvogel.xyz>
+# Date:     2025 Aug 5, Tue
+# License:  GPL v3.0
+# Desc:     `ssh-ca_cert-renew` simplifies management of a SSH CA.
+
+SCRIPT_NAME="ssh-ca_cert-renew"
+
+PERIOD_HOST_CERT="52"
+PERIOD_USER_CERT="21"
+
+# CONFIG FILE:
+# The script has defaults that will work "out-of-the-box"
+# To change settings, use the config file instead of editing the script
+# The config file should be named:
+#       daily-note.conf
+# The config file should be located at any of the following paths:
+#       ${HOME}/.config/bin-admin/daily-note/daily-note.conf
+#       ${HOME}/.config/bin-admin/daily-note.conf
+#       ${HOME}/.config/daily-note/daily-note.conf
+#       ${HOME}/.config/daily-note.conf
+#       ${HOME}/daily-note.conf
+source_conf() {
+    CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
+
+    if [[ -f "${CONFIG_DIR}/bin-admin/${SCRIPT_NAME}/${SCRIPT_NAME}.conf" ]]; then
+        CONFIG_FILE="${CONFIG_DIR}/bin-admin/${SCRIPT_NAME}/${SCRIPT_NAME}.conf"
+    elif [[ -f "${CONFIG_DIR}/bin-admin/${SCRIPT_NAME}.conf" ]]; then
+        CONFIG_FILE="${CONFIG_DIR}/bin-admin/${SCRIPT_NAME}.conf"
+    elif [[ -f "${CONFIG_DIR}/${SCRIPT_NAME}/${SCRIPT_NAME}.conf" ]]; then
+        CONFIG_FILE="${CONFIG_DIR}/${SCRIPT_NAME}/${SCRIPT_NAME}.conf"
+    elif [[ -f "${CONFIG_DIR}/${SCRIPT_NAME}.conf" ]]; then
+        CONFIG_FILE="${CONFIG_DIR}/${SCRIPT_NAME}.conf"
+    elif [[ -f "${HOME}/${SCRIPT_NAME}.conf" ]]; then
+        CONFIG_FILE="${HOME}/${SCRIPT_NAME}.conf"
+    else
+        return 0
+    fi
+
+    source "$CONFIG_FILE"
+}
+
+get_question_settings() {
+    local QUESTION="$1"
+    ! [[ "$QUESTION" ]] && exit 1
+
+    PROMPT=""
+    OPTIONS=()
+
+    if [[ "$QUESTION" == "type" ]]; then
+        PROMPT="Do you want to renew host certificates or user certificates?\n"
+        OPTIONS=("Host certificates" "User certificates")
+    elif [[ "$QUESTION" == "site" ]]; then
+        PROMPT="\nFor which site do you want to renew certificates?\n"
+        for d in $DIR_SSH_CA_CONF/* ; do OPTIONS+=("${d##*/}"); done
+    elif [[ "$QUESTION" == "quantity" ]]; then
+        PROMPT="\nWould you like to renew all $TYPE certs for the site, or just a single $TYPE cert?\n"
+        OPTIONS=("All certs" "Single cert")
+    elif [[ "$QUESTION" == "host" ]]; then
+        PROMPT="\nWhich host certificate do you want to renew?\n"
+        readarray -t OPTIONS < "$FILE_TARGETS" || exit 1
+    elif [[ "$QUESTION" == "user" ]]; then
+        PROMPT="\nWhich user certificate do you want to renew?\n"
+        readarray -t OPTIONS < "$FILE_TARGETS" || exit 1
+    fi
+
+    ! [[ "$PROMPT" ]] && exit 1
+}
+
+parse_response() {
+    local QUESTION="$1"
+    ! [[ "$QUESTION" ]] && exit 1
+
+    select choice in "${OPTIONS[@]}"; do
+        if ! [[ "$choice" ]]; then
+            echo -e "\n[WARN]: Unknown response. Please select a valid option.\n"
+            return 1
+        fi
+
+        # Parse "type" and "quantity"
+        if [[ "$QUESTION" == "type" ]] || [[ "$QUESTION" == "quantity" ]]; then
+            choice="${choice%% *}"
+            choice="${choice@L}"
+        fi
+
+        declare -g "${QUESTION@U}=$choice"
+
+        return 0
+    done
+}
+
+ask_user() {
+    local QUESTION="$1"
+    ! [[ "$QUESTION" ]] && exit 1
+
+    # Get settings for question
+    get_question_settings "$QUESTION"
+
+    # Ask question
+    echo -e "$PROMPT"
+    PS3="Please choose a number: "
+
+    # Parse a valid answer, or ask the question again
+    parse_response "$QUESTION" || $FUNCNAME "$QUESTION"
+}
+
+does_file_exist() {
+    if ! [[ -f "$1" ]]; then
+        echo "[ERROR]: The file \`${1}\` doesn't exist. Exiting now." >&2
+        exit 1
+    fi
+}
+
+settings_signing() {
+    FILE_TARGETS="${DIR_SSH_CA_CONF}/${SITE}/${TYPE}s"
+
+    does_file_exist "$FILE_TARGETS"
+}
+
+set_targets() {
+    # When renewing all certs
+    if [[ "$QUANTITY" == "all" ]]; then
+        readarray -t TARGETS < "$FILE_TARGETS"
+        return 0
+    fi
+
+    # When renewing a single cert
+    TARGET="${TYPE@U}"
+    TARGET="${!TARGET}"
+}
+
+print_debug() {
+    cat << EOF
+
+[INFO]: this is a debug statement:
+- cert type = $TYPE
+- site = $SITE
+- renew = ${TARGET:-all}
+
+EOF
+}
+
+settings_cert() {
+    CA="${TYPE}-CA"
+    SIGNING_KEY="${DIR_SSH_CA_KEYS}/${SITE}/${CA}/${SITE}_${CA}"
+
+    does_file_exist "$SIGNING_KEY"
+
+    if [[ "$TARGET" =~ "CA" ]]; then
+        NAME="${SITE}_${CA}"
+        PUBKEY="${DIR_SSH_CA_KEYS}/${SITE}/${CA}/${NAME}.pub"
+        SRC_CERT="${DIR_SSH_CA_KEYS}/${SITE}/${CA}/${NAME}-cert.pub"
+        DEST_CERT="${DIR_SSH_CA_KEYS}/${SITE}/${CA}/certs/${NAME}_cert.pub"
+    else
+        NAME="$TARGET"
+        PUBKEY="${DIR_SSH_CA_KEYS}/${SITE}/${TYPE}s/${NAME}.pub"
+        SRC_CERT="${DIR_SSH_CA_KEYS}/${SITE}/${TYPE}s/${NAME}-cert.pub"
+        DEST_CERT="${DIR_SSH_CA_KEYS}/${SITE}/${TYPE}s/certs/${NAME}_cert.pub"
+    fi
+
+    if [[ "$TYPE" == "user" ]]; then
+        DEST_CERT="${DIR_SSH_CA_KEYS}/${SITE}/${TYPE}s/certs/${NAME}_${SITE}_cert.pub"
+        USERLIST_FILE="${DIR_SSH_CA_CONF}/${SITE}/userlist_${NAME}"
+        does_file_exist "$USERLIST_FILE"
+        readarray -t USERLIST < "$USERLIST_FILE"
+    fi
+
+    does_file_exist "$PUBKEY"
+}
+
+sign_host_cert() {
+    ssh-keygen \
+        -V "-5m:+${PERIOD_HOST_CERT}w" \
+        -U \
+        -h \
+        -s "$1" \
+        -I "$2" \
+        "$3"
+}
+
+sign_user_cert() {
+    ssh-keygen \
+        -V "-5m:+${PERIOD_USER_CERT}w" \
+        -U \
+        -s "$1" \
+        -n "$2" \
+        -I "$3" \
+        "$4"
+}
+
+generate_cert() {
+    # Attempt to sign the cert
+    if [[ "$TYPE" == "host" ]]; then
+        sign_host_cert "$SIGNING_KEY" "$NAME" "$PUBKEY"
+    elif [[ "$TYPE" == "user" ]]; then
+        sign_user_cert "$SIGNING_KEY" "$USERLIST" "$NAME" "$PUBKEY"
+    fi
+
+    local EXIT_CODE="$?"
+
+    # Check if certificate renewal was successful
+    if ! [[ "$EXIT_CODE" == 0 ]]; then
+        echo "[WARN]: Failed to sign $TARGET."
+        return 1
+    fi
+
+    # Check that the new certificate is at the correct path
+    if ! [[ -f "$SRC_CERT" ]]; then
+        echo "[WARN]: The certificate file \`$SRC_CERT\` should exist, but doesn't. Failed to move."
+        return 1
+    fi
+
+    local DEST_DIR="${DEST_CERT%/*}"
+
+    # Check that the destination directory exists; if not, create it
+    if ! [[ -d "$DEST_DIR" ]]; then
+        mkdir -pv "$DEST_DIR"
+    fi
+
+    # Move certificate to destination
+    mv -f "$SRC_CERT" "$DEST_CERT"
+}
+
+renew_cert_single() {
+    settings_cert
+    generate_cert \
+        && echo -e "\n[INFO]: ${TYPE^} certificate \`$TARGET\` has been renewed!"
+}
+
+renew_cert_all() {
+    for ((i=0; i < "${#TARGETS[@]}"; i++)); do
+        TARGET="${TARGETS[i]}"
+        settings_cert
+        generate_cert
+    done
+
+    echo -e "\n[INFO]: ${TYPE^} certificates for \`$SITE\` have been renewed!"
+}
+
+main() {
+    source_conf
+
+    if ! [[ "$DIR_SSH_CA" ]]; then
+        echo "[ERROR]: \`DIR_SSH_CA\` must be set for this script to work." >&2
+        echo "[INFO]: Please create a config file and set this variable to continue." >&2
+        exit 1
+    else
+        DIR_SSH_CA_CONF="${DIR_SSH_CA}/configs"
+        DIR_SSH_CA_KEYS="${DIR_SSH_CA}/keys"
+    fi
+
+    ask_user "type"
+    ask_user "site"
+    ask_user "quantity"
+
+    settings_signing
+    [[ "$QUANTITY" == "single" ]] && ask_user "$TYPE"
+    set_targets
+    print_debug
+
+    if [[ "$QUANTITY" == "single" ]]; then
+        renew_cert_single
+    elif [[ "$QUANTITY" == "all" ]]; then
+        renew_cert_all
+    fi
+}
+
+main
