@@ -156,10 +156,11 @@ settings_cert() {
         NAME="$TARGET"
         PUBKEY="${DIR_SSH_CA_KEYS}/${SITE}/${TYPE}s/${NAME}.pub"
         SRC_CERT="${DIR_SSH_CA_KEYS}/${SITE}/${TYPE}s/${NAME}-cert.pub"
-        DEST_CERT="${DIR_SSH_CA_KEYS}/${SITE}/${TYPE}s/certs/${NAME}_cert.pub"
     fi
 
-    if [[ "$TYPE" == "user" ]]; then
+    if [[ "$TYPE" == "host" ]]; then
+        DEST_CERT="${DIR_SSH_CA_KEYS}/${SITE}/${TYPE}s/certs/${NAME}_cert.pub"
+    elif [[ "$TYPE" == "user" ]]; then
         DEST_CERT="${DIR_SSH_CA_KEYS}/${SITE}/${TYPE}s/certs/${NAME}_${SITE}_cert.pub"
         USERLIST_FILE="${DIR_SSH_CA_CONF}/${SITE}/userlist_${NAME}"
         does_file_exist "$USERLIST_FILE"
