@@ -170,6 +170,16 @@ settings_cert() {
     does_file_exist "$PUBKEY"
 }
 
+sign_CA_cert() {
+    ssh-keygen \
+        -V "-5m:+${PERIOD_HOST_CERT}w" \
+        -U \
+        -h \
+        -s "$1" \
+        -I "$2" \
+        "$3"
+}
+
 sign_host_cert() {
     ssh-keygen \
         -V "-5m:+${PERIOD_HOST_CERT}w" \
@@ -193,7 +203,9 @@ sign_user_cert() {
 
 generate_cert() {
     # Attempt to sign the cert
-    if [[ "$TYPE" == "host" ]]; then
+    if [[ "$TARGET" =~ "CA" ]]; then
+        sign_CA_cert "$SIGNING_KEY" "$NAME" "$PUBKEY"
+    elif [[ "$TYPE" == "host" ]]; then
         sign_host_cert "$SIGNING_KEY" "$NAME" "$PUBKEY"
     elif [[ "$TYPE" == "user" ]]; then
         sign_user_cert "$SIGNING_KEY" "$USERLIST" "$NAME" "$PUBKEY"
