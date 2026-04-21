@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+
+# Name:     ssh-ca_ansible_replace
+# Author:   David Vogel <david@davidvogel.xyz>
+# Date:     2025 Apr 20, Mon
+# License:  GPL v3.0
+# Desc:     `ssh-ca_ansible_replace` makes updating Ansible easy.
+
+SCRIPT_NAME="ssh-ca_ansible_replace"
+
+# Prints provided message to STDERR; then, exits with return code `1`
+error() {
+    echo "$1" >&2 \
+        && exit 1
+}
+
+# CONFIG FILE:
+# The script has defaults that will work "out-of-the-box"
+# To change settings, use the config file instead of editing the script
+# The config file should be named:
+#       ssh-ca_ansible_replace.conf
+# The config file should be located at any of the following paths:
+#       ${HOME}/.config/bin-admin/ssh-ca_ansible_replace/ssh-ca_ansible_replace.conf
+#       ${HOME}/.config/bin-admin/ssh-ca_ansible_replace.conf
+#       ${HOME}/.config/ssh-ca_ansible_replace/ssh-ca_ansible_replace.conf
+#       ${HOME}/.config/ssh-ca_ansible_replace.conf
+#       ${HOME}/ssh-ca_ansible_replace.conf
+source_conf() {
+    local CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
+
+    local CONFS=(
+        "${CONFIG_DIR}/bin-admin/${SCRIPT_NAME}/${SCRIPT_NAME}.conf"
+        "${CONFIG_DIR}/bin-admin/${SCRIPT_NAME}.conf"
+        "${CONFIG_DIR}/${SCRIPT_NAME}/${SCRIPT_NAME}.conf"
+        "${CONFIG_DIR}/${SCRIPT_NAME}.conf"
+        "${HOME}/${SCRIPT_NAME}.conf"
+    )
+
+    for ((i=0; i < "${#CONFS[@]}"; i++)); do
+        if [[ -f "${CONFS[i]}" ]]; then
+            source "${CONFS[i]}"
+            return 0
+        fi
+    done
+}
+
+var_checks() {
+    local CHECKS_FAILED=0
+
+    # Assert that `DIR_SSH_CA` has been set, and is a directory
+    if ! [[ "${DIR_SSH_CA}" ]] || ! [[ -d "${DIR_SSH_CA}" ]]; then
+        echo -e "[WARN]: Please set \`DIR_SSH_CA\` in a config file."
+        CHECKS_FAILED+=1
+    fi
+
+    # Assert that `DIR_ANSIBLE` has been set, and is a directory
+    if ! [[ "${DIR_ANSIBLE}" ]] || ! [[ -d "${DIR_ANSIBLE}" ]]; then
+        echo -e "[WARN]: Please set \`DIR_ANSIBLE\` in a config file."
+        CHECKS_FAILED+=1
+    fi
+
+    # Assert that `SITE` has been set
+    if ! [[ "${SITE}" ]]; then
+        echo -e "[WARN]: Please set \`SITE\` in a config file."
+        CHECKS_FAILED+=1
+    fi
+
+    # Exit if any checks have failed
+    if ((CHECKS_FAILED > 0)); then
+        error "[ERROR]: Please review the failed checks above; then, try again."
+    fi
+}
+
+update_host_certs() {
+    SRC_DIR_HOST_CERTS="${DIR_SSH_CA}/keys/${SITE}/hosts/certs"
+    HOST_CERT_FILES=(${SRC_DIR_HOST_CERTS}/*)
+    DEST_DIR_HOST_CERTS="${DIR_ANSIBLE}/inventories/*/host_vars"
+
+    # Assert that `SRC_DIR_HOST_CERTS` is a directory
+    if ! [[ -d "${SRC_DIR_HOST_CERTS}" ]]; then
+        return 1
+    fi
+
+    # Assert that there is at least 1 element in `HOST_CERT_FILES` array
+    if ! ((${#HOST_CERT_FILES[@]} > 0)); then
+        return 1
+    fi
+
+    # Loop through the files in `SRC_DIR_HOST_CERTS`
+    for ((i=0; i < ${#HOST_CERT_FILES[@]}; i++)); do
+        # Store a clean value for `HOST_NAME`
+        local HOST_NAME="${HOST_CERT_FILES[i]##*/}"
+        HOST_NAME="${HOST_NAME%%_cert.pub*}"
+
+        # Store the `HOSTCERT` from `HOST_CERT_FILES` into a variable
+        read -r HOSTCERT < "${HOST_CERT_FILES[i]}"
+        # going to want to handle cases of "1 space vs 2 spaces"
+        # 1 space = `HOSTCERT=${HOSTCERT}`
+        # 2 spaces = `HOSTCERT="${HOSTCERT% *}"`
+        # or, the change to "how keys are handled" will fix it
+        HOSTCERT="${HOSTCERT% *}"
+
+        # Store the `SSH_CERT_HEADER` from the `HOSTCERT`
+        local SSH_CERT_HEADER="${HOSTCERT%% *}"
+
+        # Find the `host_vars` file for `HOST_NAME` that contains the `SSH_CERT_HEADER`
+        local ANSIBLE_CERT="$(grep -R "$SSH_CERT_HEADER" ${DEST_DIR_HOST_CERTS}/${HOST_NAME})"
+
+        # Store the filename of the Ansible file containing the `SSH_CERT_HEADER`
+        local ANSIBLE_FILE="${ANSIBLE_CERT%%:  *}"
+
+        # Store the certificate information from the Ansible file containing the `SSH_CERT_HEADER`
+        ANSIBLE_CERT="${ANSIBLE_CERT##*:  }"
+
+        # If `HOSTCERT` and `ANSIBLE_CERT` are different, update `ANSIBLE_FILE` with the new cert info
+        if [[ "$HOSTCERT" == "$ANSIBLE_CERT" ]]; then
+            echo "[INFO]: \`$HOST_NAME\`'s host certificate agrees with Ansible."
+        else
+            echo "[WARN]: \`$HOST_NAME\`'s host certificate is different in Ansible. Attempting to change now."
+
+            sed -i "s|${ANSIBLE_CERT}|${HOSTCERT}|g" "$ANSIBLE_FILE" \
+                && echo "[INFO]: \`$HOST_NAME\`'s host certificate has been changed in Ansible."
+        fi
+    done
+}
+
+main() {
+    source_conf
+    var_checks
+    #update_host_keys
+    update_host_certs
+}
+
+main
